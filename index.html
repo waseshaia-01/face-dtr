@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Face Recognition DTR</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; text-align: center; background: #f9f9f9; }
+    video { border: 2px solid #333; border-radius: 12px; }
+    button { margin: 8px; padding: 10px 15px; border: none; border-radius: 8px; background: #007bff; color: white; cursor: pointer; }
+    button:hover { background: #0056b3; }
+    #logs { margin-top: 20px; max-height: 200px; overflow-y: auto; background: white; padding: 10px; border: 1px solid #ccc; border-radius: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Face Recognition Daily Time Record</h1>
+  
+  <video id="video" width="320" height="240" autoplay muted></video>
+  <br>
+  <input id="empId" placeholder="Employee ID">
+  <input id="empName" placeholder="Employee Name">
+  <br>
+  <button onclick="startCamera()">Start Camera</button>
+  <button onclick="captureSample()">Capture Sample</button>
+  <button onclick="finishEnrollment()">Finish Enrollment</button>
+  <br>
+  <button onclick="checkIn()">Check-In</button>
+  <button onclick="checkOut()">Check-Out</button>
+  <button onclick="syncData()">Sync Now</button>
+
+  <div id="logs"><b>Logs:</b><br></div>
+
+  <!-- face-api.js -->
+  <script src="https://cdn.jsdelivr.net/npm/face-api.js"></script>
+  <script>
+    const video = document.getElementById("video");
+    const logs = document.getElementById("logs");
+    let labeledDescriptors = [];
+    let currentSamples = [];
+    const THRESHOLD = 0.52;
+
+    async function startCamera() {
+      await Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri("./models"),
+        faceapi.nets.faceLandmark68Net.loadFromUri("./models"),
+        faceapi.nets.faceRecognitionNet.loadFromUri("./models")
+      ]);
+      navigator.mediaDevices.getUserMedia({ video: {} })
+        .then(stream => video.srcObject = stream);
+      log("Camera started, models loaded.");
+    }
+
+    async function captureSample() {
+      const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+      if (!detections) return log("No face detected.");
+      currentSamples.push(detections.descriptor);
+      log("Captured sample " + currentSamples.length);
+    }
+
+    function finishEnrollment() {
+      const empId = document.getElementById("empId").value;
+      const empName = document.getElementById("empName").value;
+      if (!empId || !empName) return log("Enter ID and Name first.");
+      if (currentSamples.length === 0) return log("No samples captured.");
+      labeledDescriptors.push(new faceapi.LabeledFaceDescriptors(empId + " - " + empName, currentSamples));
+      log("Enrollment finished for " + empName);
+      currentSamples = [];
+      saveToIndexedDB("employees", { id: empId, name: empName, descriptors: labeledDescriptors[labeledDescriptors.length-1].descriptors });
+    }
+
+    async function recognizeFace() {
+      const detections = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+      if (!detections) { log("No face detected."); return null; }
+      const faceMatcher = new faceapi.FaceMatcher(labeledDescriptors, THRESHOLD);
+      const match = faceMatcher.findBestMatch(detections.descriptor);
+      log("Recognition: " + match.toString());
+      return match;
+    }
+
+    async function checkIn() {
+      const match = await recognizeFace();
+      if (!match || match.label === "unknown") return;
+      saveToIndexedDB("attendance", { person: match.label, type: "IN", time: new Date().toISOString(), synced: 0 });
+      log(match.label + " checked IN.");
+    }
+
+    async function checkOut() {
+      const match = await recognizeFace();
+      if (!match || match.label === "unknown") return;
+      saveToIndexedDB("attendance", { person: match.label, type: "OUT", time: new Date().toISOString(), synced: 0 });
+      log(match.label + " checked OUT.");
+    }
+
+    function syncData() {
+      // 🔹 Replace with Supabase API later
+      log("Syncing data... (stub)");
+    }
+
+    function log(msg) {
+      logs.innerHTML += msg + "<br>";
+      logs.scrollTop = logs.scrollHeight;
+    }
+
+    // ============ IndexedDB storage ============
+    function saveToIndexedDB(storeName, data) {
+      const request = indexedDB.open("FaceDTR", 1);
+      request.onupgradeneeded = function(e) {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains("employees")) db.createObjectStore("employees", { keyPath: "id" });
+        if (!db.objectStoreNames.contains("attendance")) db.createObjectStore("attendance", { autoIncrement: true });
+      };
+      request.onsuccess = function(e) {
+        const db = e.target.result;
+        const tx = db.transaction(storeName, "readwrite");
+        tx.objectStore(storeName).put(data);
+      };
+    }
+
+    // Register Service Worker for offline mode
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.register("./service-worker.js")
+        .then(() => log("Service Worker registered."))
+        .catch(err => log("SW failed: " + err));
+    }
+  </script>
+</body>
+</html>
